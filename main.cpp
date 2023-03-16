@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iostream>
 #include <mysqlx/xdevapi.h>
+#include <queue>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -84,51 +85,44 @@ read_subcategory_links(mysqlx::Session &session) {
     return subcategory_links;
 }
 
-void access_subcategories_impl(
-    const std::string &category,
-    std::unordered_map<std::string, unsigned int> &subcategories,
-    unsigned int depth,
-    const std::unordered_multimap<std::string, std::string>
-        &subcategory_links) {
-    auto itr_subcategory = subcategories.find(category);
-    if (itr_subcategory != subcategories.end()) {
-        itr_subcategory->second = std::min(itr_subcategory->second, depth);
-        return;
-    }
-    subcategories.emplace(category, depth);
-    auto range = subcategory_links.equal_range(category);
-    for (auto itr = range.first; itr != range.second; ++itr) {
-        access_subcategories_impl(itr->second, subcategories, depth + 1,
-                                  subcategory_links);
-    }
-}
-
 std::unordered_map<std::string, unsigned int>
 access_subcategories(const std::vector<std::string> &categories,
                      const std::unordered_multimap<std::string, std::string>
                          &subcategory_links) {
 
+    std::unordered_map<std::string, unsigned int> depths;
+    std::queue<std::string> q;
+    for (const auto &cat : categories) {
+        q.push(cat);
+    }
+    std::cout << std::format("Accessing subcategories recursively ...")
+              << std::endl;
     auto start_time = std::chrono::high_resolution_clock::now();
-    std::unordered_map<std::string, unsigned int> subcategories;
-    for (const auto &category : categories) {
-        std::cout << std::format(
-                         "Accessing subcategories of {} recursively ...",
-                         category)
-                  << std::endl;
-        access_subcategories_impl(category, subcategories, 0,
-                                  subcategory_links);
+    // SPFA
+    while (!q.empty()) {
+        auto cat = q.front();
+        q.pop();
+        auto range = subcategory_links.equal_range(cat);
+        for (auto itr = range.first; itr != range.second; ++itr) {
+            const auto &subcat = itr->second;
+            if (depths.count(subcat) && depths[subcat] <= depths[cat] + 1) {
+                continue;
+            }
+            depths[subcat] = depths[cat] + 1;
+            q.emplace(subcat);
+        }
     }
     auto end_time = std::chrono::high_resolution_clock::now();
     std::cout << std::format(
                      "Done\nAccessed {} subcategories\nElapsed time: {} s",
-                     subcategories.size(),
+                     depths.size(),
                      (end_time - start_time) / std::chrono::seconds(1))
               << std::endl;
-    return subcategories;
+    return depths;
 }
 
 void dump_subcategories(
-    const std::unordered_map<std::string, unsigned int> &subcategories,
+    const std::unordered_map<std::string, unsigned int> &subcategory_depths,
     const std::string &out_path,
     const std::unordered_multimap<std::string, std::string>
         &subcategory_links) {
@@ -138,9 +132,9 @@ void dump_subcategories(
     if (!ofs) {
         throw std::exception(std::format("Cannot open {}", out_path).c_str());
     }
-    for (const auto &[subcategory, depth] : subcategories) {
-        ofs << subcategory << ' ' << depth;
-        auto range = subcategory_links.equal_range(subcategory);
+    for (const auto &[subcat, depth] : subcategory_depths) {
+        ofs << subcat << ' ' << depth;
+        auto range = subcategory_links.equal_range(subcat);
         for (auto itr = range.first; itr != range.second; ++itr) {
             ofs << ' ' << itr->second;
         }
@@ -162,18 +156,18 @@ void insert_page(std::unordered_map<unsigned int, unsigned int> &pages,
 std::unordered_map<unsigned int, unsigned int>
 access_pages(const std::unordered_map<std::string, unsigned int> &subcategories,
              mysqlx::Session &session) {
-    std::unordered_map<unsigned int, unsigned int> pages;
+    std::unordered_map<unsigned int, unsigned int> page_depths;
     auto start_time = std::chrono::high_resolution_clock::now();
     std::cout << "Accessing pages of subcategories ..." << std::endl;
     auto total = subcategories.size();
     size_t i = 0;
-    for (const auto &[subcategory, depth] : subcategories) {
+    for (const auto &[subcat, depth] : subcategories) {
         mysqlx::SqlResult rows;
         try {
             rows = session
                        .sql("SELECT cl_from FROM categorylinks WHERE "
                             "cl_to = ? AND cl_type = \"page\"")
-                       .bind(subcategory)
+                       .bind(subcat)
                        .execute();
         } catch (std::exception &e) {
             std::cerr << "SQL query failed: " << e.what() << std::endl;
@@ -181,22 +175,22 @@ access_pages(const std::unordered_map<std::string, unsigned int> &subcategories,
         }
         while (auto row = rows.fetchOne()) {
             auto cl_from = static_cast<unsigned int>(row[0]);
-            insert_page(pages, cl_from, depth);
+            insert_page(page_depths, cl_from, depth);
         }
         if (++i % 10000 == 0) {
             std::cout << std::format(
                              "Accessed {}/{} subcategories, {} pages ...", i,
-                             total, pages.size())
+                             total, page_depths.size())
                       << std::endl;
         }
     }
     auto end_time = std::chrono::high_resolution_clock::now();
     std::cout << std::format("Accessed {}/{} subcategories, {} pages "
                              "...\nDone\nElapsed time: {} s",
-                             i, total, pages.size(),
+                             i, total, page_depths.size(),
                              (end_time - start_time) / std::chrono::seconds(1))
               << std::endl;
-    return pages;
+    return page_depths;
 }
 
 std::string get_page_title_from_id(unsigned int page_id,
@@ -231,15 +225,15 @@ void dump_pages(const std::unordered_map<unsigned int, unsigned int> &pages,
                     .bind(page_id)
                     .execute();
         } catch (std::exception &e) {
-            std::cerr << std::format("Failed to dump page {}: {}",
-                                     page_id, e.what())
+            std::cerr << std::format("Failed to dump page {}: {}", page_id,
+                                     e.what())
                       << std::endl;
             continue;
         }
         ofs << page_title << ' ' << page_id << ' ' << depth;
         while (auto row = rows.fetchOne()) {
-            auto category = std::string(row[0]);
-            ofs << ' ' << category;
+            auto cat = std::string(row[0]);
+            ofs << ' ' << cat;
         }
         ofs << '\n';
         if (++i % 10000 == 0) {
@@ -266,20 +260,21 @@ int main(int argc, char *argv[]) try {
         categories.emplace_back(argv[i]);
     }
     std::string out_dir = "./data/";
-    auto subcategories_path = out_dir + "subcategories";
-    auto pages_path = out_dir + "pages";
+    auto subcat_path = out_dir + "subcategories";
+    auto page_path = out_dir + "pages";
     for (const auto &category : categories) {
-        subcategories_path += '_';
-        subcategories_path += category;
-        pages_path += '_';
-        pages_path += category;
+        subcat_path += "__";
+        subcat_path += category;
+        page_path += "__";
+        page_path += category;
     }
     auto session = connect_to_database();
     auto subcategory_links = read_subcategory_links(session);
-    auto subcategories = access_subcategories(categories, subcategory_links);
-    dump_subcategories(subcategories, subcategories_path, subcategory_links);
-    auto pages = access_pages(subcategories, session);
-    dump_pages(pages, pages_path, session);
+    auto subcategory_depths =
+        access_subcategories(categories, subcategory_links);
+    dump_subcategories(subcategory_depths, subcat_path, subcategory_links);
+    auto page_depths = access_pages(subcategory_depths, session);
+    dump_pages(page_depths, page_path, session);
     return EXIT_SUCCESS;
 } catch (std::exception &e) {
     std::cerr << "Exception: " << e.what() << std::endl;
