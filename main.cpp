@@ -85,12 +85,29 @@ read_subcategory_links(mysqlx::Session &session) {
     return subcategory_links;
 }
 
+void print_path(const std::string &category,
+                const std::unordered_map<std::string, std::string> &parent) {
+    std::vector<std::string> path;
+    auto itr = parent.find(category);
+    while (itr != parent.end()) {
+        auto &cat = itr->second;
+        path.emplace_back(cat);
+        itr = parent.find(cat);
+    }
+    std::reverse(path.begin(), path.end());
+    for (const auto &cat : path) {
+        std::cout << cat << " -> ";
+    }
+    std::cout << category;
+}
+
 std::unordered_map<std::string, unsigned int>
 access_subcategories(const std::vector<std::string> &categories,
                      const std::unordered_multimap<std::string, std::string>
                          &subcategory_links) {
 
     std::unordered_map<std::string, unsigned int> depths;
+    std::unordered_map<std::string, std::string> parent;
     std::queue<std::string> q;
     for (const auto &cat : categories) {
         q.push(cat);
@@ -102,13 +119,21 @@ access_subcategories(const std::vector<std::string> &categories,
     while (!q.empty()) {
         auto cat = q.front();
         q.pop();
+
         auto range = subcategory_links.equal_range(cat);
         for (auto itr = range.first; itr != range.second; ++itr) {
             const auto &subcat = itr->second;
+            if (std::find(categories.begin(), categories.end(), subcat) !=
+                categories.end()) {
+                std::cout << "Loop: ";
+                print_path(cat, parent);
+                std::cout << " -> " << subcat << std::endl;
+            }
             if (depths.count(subcat) && depths[subcat] <= depths[cat] + 1) {
                 continue;
             }
             depths[subcat] = depths[cat] + 1;
+            parent[subcat] = cat;
             q.emplace(subcat);
         }
     }

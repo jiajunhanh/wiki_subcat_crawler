@@ -24,5 +24,5 @@ if (MSVC)
             $<TARGET_RUNTIME_DLLS:wiki_subcat_crawler>
             $<TARGET_FILE_DIR:wiki_subcat_crawler>)
 else ()
-    message(FATAL_ERROR "MSVC is required")
+    message(FATAL_ERROR "MSVC is required. If you use Linux or Mac, please configure CMakeLists.txt to correctly link the Connctor/C++.")
 endif ()
